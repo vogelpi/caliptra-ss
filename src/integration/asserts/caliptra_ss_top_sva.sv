@@ -378,7 +378,7 @@ module caliptra_ss_top_sva
   // fuse_ctrl zeroization
   ////////////////////////////////////////////////////
 
-  // Return whether is a partition is zeroized
+  // Return whether a partition is zeroized
   function bit is_zeroized(int part_idx);
     logic [ScrmblBlockWidth-1:0] zero_marker;
     if (part_idx < 0 || part_idx >= NumPart) begin
@@ -394,6 +394,26 @@ module caliptra_ss_top_sva
     end
   endfunction : is_zeroized
 
+  // Return whether a specific address in a partition is zeroized
+  function bit data_and_ecc_zeroized(int part_idx, bit [otp_ctrl_pkg::OtpAddrWidth-1:0] addr);
+    if (part_idx < 0 || part_idx >= NumPart) begin
+      return 0; // Invalid partition index
+    end else if (!PartInfo[part_idx].zeroizable) begin
+      return 0; // Not zeroizable
+    end else if (addr < PartInfo[part_idx].offset ||
+                 addr > otp_ctrl_part_pkg::digest_addrs[part_idx]) begin
+      return 0; // Invalid address
+    end
+    end else begin
+      // @Martin: my understanding here is that the address forwarded from the DAI is a byte
+      // address. We then divide by two to get a half-word address.
+      return &{`CPTRA_SS_TB_TOP_NAME.u_otp.u_prim_ram_1p_adv.u_mem.mem[addr/2],
+               `CPTRA_SS_TB_TOP_NAME.u_otp.u_prim_ram_1p_adv.u_mem.mem[addr/2+1],
+               `CPTRA_SS_TB_TOP_NAME.u_otp.u_prim_ram_1p_adv.u_mem.mem[addr/2+2],
+               `CPTRA_SS_TB_TOP_NAME.u_otp.u_prim_ram_1p_adv.u_mem.mem[addr/2+3]};
+    end
+  endfunction : data_and_ecc_zeroized
+
   // Store the latest direct_access_rdata release by the otp_ctrl_dai block after a successful access.
   logic [NumDaiWords-1:0][31:0] past_direct_access_rdata = 0;
   initial begin
@@ -404,6 +424,27 @@ module caliptra_ss_top_sva
       end
     end
   end
+
+  // After a zeroize command, the corresponding fuse bits must turn to all ones.
+  // @Martin: One of the zeroization tests (the one ending on _corrupt.c) glitches the write
+  // command to the zeroization marker and then checks the hardware behavior. This assertion
+  // might need disabling for this test.
+  `CALIPTRA_ASSERT(FcZeroizeAllOnes_A,
+    ((PartInfo[part_idx].hw_digest || PartInfo[part_idx].sw_digest) &&
+     (PartInfo[part_idx].zeroizable) &&
+     (`FC_PATH.dai_req) &&
+     (dai_cmd_e'(`FC_PATH.dai_cmd) == DaiZeroize) &&
+     (`FC_PATH.dai_addr >= PartInfo[part_idx].offset) &&
+     (`FC_PATH.dai_addr <= otp_ctrl_part_pkg::digest_addrs[part_idx]))
+    // @Martin: the 10 below is chosen a bit arbitrarily. We need to ensure that the Zeroize
+    // command really went through. Using the waves, you should be able to tune this. Just be
+    // aware that for secret partitions, i.e., with scrambling enabled, the delay is a bit higher.
+    |-> ##10
+    // @Martin: please be careful: the dai_addr below might have changed since the last command.
+    // I think you actually need to buffer it, or with the right syntax you can use the value 10
+    // cycles ago.
+    data_and_ecc_zeroized(part_idx, `FC_PATH.dai_addr)
+  )
 
   // A zeroized partition must still have the same access privileges: writes fail for a locked partition
   `CALIPTRA_ASSERT(FcZeroizePartWriteLock_A,
